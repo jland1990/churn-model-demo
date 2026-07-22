@@ -1,76 +1,59 @@
-import gradio as gr
+import streamlit as st
 import numpy as np
 import pandas as pd
 import pickle
 
-# Load model and encoder from files uploaded to the Hugging Face Space
-with open("churn_rf_healthy_meals.pkl", "rb") as f:
-    model = pickle.load(f)
+# Load model and encoder once at startup (cached so they don't reload on every interaction)
+@st.cache_resource
+def load_artifacts():
+    with open("churn_rf_healthy_meals.pkl", "rb") as f:
+        model = pickle.load(f)
+    with open("churn_encoder_healthy_meals.pkl", "rb") as f:
+        encoder = pickle.load(f)
+    return model, encoder
 
-with open("churn_encoder_healthy_meals.pkl", "rb") as f:
-    encoder = pickle.load(f)
+model, encoder = load_artifacts()
 
-def predict(age, income_level, education, device_type, tech_comfort_score):
-    """
-    Predict renewal probability for a single customer.
+# ── UI ────────────────────────────────────────────────────────────────────────
 
-    The input values must be passed through the same encoder used during
-    training. We build a one-row DataFrame with the raw categorical values
-    (matching the column names the encoder was fit on), transform it, then
-    combine with the numeric features in the same order as the training
-    feature matrix:
+st.title("Customer Renewal Probability Predictor")
+st.write("Enter customer attributes to predict the likelihood of subscription renewal.")
 
-        Training column order (from Step 4 of the training notebook):
-        [AGE, TECH_COMFORT_SCORE, <encoded dummies in encoder order>]
+age               = st.number_input("Age", min_value=18, max_value=100, value=35)
+income_level      = st.radio("Income Level",  ["Low", "Medium", "High", "Very High"])
+education         = st.radio("Education",     ["Graduate", "High School", "Other", "Post-Graduate"])
+device_type       = st.radio("Device Type",   ["Desktop-only", "Mobile-only", "Multi-device"])
+tech_comfort_score = st.number_input("Tech Comfort Score", min_value=1, max_value=10, value=5)
 
-    Bug note: do NOT recreate the one-hot logic by hand — case mismatches
-    or category order differences will produce a constant all-zeros input
-    and a constant prediction regardless of what the user enters.
-    """
+if st.button("Predict"):
 
-    # Build a single-row DataFrame with the raw categorical values.
-    # Column names must match exactly what the encoder was fit on (UPPERCASE).
+    # Build categorical DataFrame — column names must match encoder exactly
     raw = pd.DataFrame([{
         'INCOME_LEVEL': income_level,
         'EDUCATION':    education,
         'DEVICE_TYPE':  device_type,
     }])
 
-    # Apply the saved encoder (transform only — never fit_transform here)
+    # Apply the saved encoder (transform only — never fit_transform)
     encoded = encoder.transform(raw)
     encoded_df = pd.DataFrame(encoded, columns=encoder.get_feature_names_out())
 
-    # Build the numeric part of the feature vector
+    # Numeric features first, then encoded dummies — must match training column order
     numeric_df = pd.DataFrame([{
-        'AGE':               age,
+        'AGE':                age,
         'TECH_COMFORT_SCORE': tech_comfort_score,
     }])
 
-    # Combine in the same column order as the training feature matrix:
-    # numeric columns first, then encoded dummies
     input_df = pd.concat([numeric_df, encoded_df], axis=1)
 
-    # Predict: column 1 = P(renewed), column 0 = P(churned)
+    # Column 1 = P(renewed), column 0 = P(churned)
     probability = model.predict_proba(input_df)[0][1]
-
     risk = "Low" if probability >= 0.6 else "Medium" if probability >= 0.4 else "High"
-    return f"Renewal Probability: {probability:.2f}  |  Churn Risk: {risk}"
 
-
-# Gradio radio values must exactly match the category strings the encoder
-# was trained on (check encoder.categories_ printed in the previous cell).
-iface = gr.Interface(
-    fn=predict,
-    inputs=[
-        gr.Number(label="Age"),
-        gr.Radio(["Low", "Medium", "High", "Very High"], label="Income Level"),
-        gr.Radio(["Graduate", "High School", "Other", "Post-Graduate"], label="Education"),
-        gr.Radio(["Desktop-only", "Mobile-only", "Multi-device"], label="Device Type"),
-        gr.Number(label="Tech Comfort Score"),
-    ],
-    outputs="text",
-    title="Customer Renewal Probability Predictor",
-    description="Enter customer attributes to predict the likelihood of subscription renewal."
-)
-
-iface.launch(server_name="0.0.0.0", server_port=7860)
+    st.metric("Renewal Probability", f"{probability:.2f}")
+    if risk == "High":
+        st.error(f"Churn Risk: {risk}")
+    elif risk == "Medium":
+        st.warning(f"Churn Risk: {risk}")
+    else:
+        st.success(f"Churn Risk: {risk}")
